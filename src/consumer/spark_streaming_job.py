@@ -127,3 +127,82 @@ class StockStreamProcessor:
             "high_volume_down",
             when((col("price_change") < 0) & (col("volume_ratio") > 1.5), True).otherwise(False)
         )
+
+    def run_streaming_pipeline(self):
+        """Execute the complete streaming pipeline."""
+        # Import signal generation functions
+        from ..processing.signal_generator import generate_trading_signals, add_risk_management_metrics
+        
+        print("Starting real-time stock market analytics pipeline...")
+        
+        # Read streaming data from Kafka
+        kafka_stream = self.read_kafka_stream()
+        print("Connected to Kafka stream")
+        
+        # Parse and process the data
+        stock_data = self.parse_stock_data(kafka_stream)
+        print("Parsing stock data from Kafka messages")
+        
+        # Apply price action and volume analysis
+        enriched_data = self.calculate_price_action_metrics(stock_data)
+        print("Calculating price action and volume metrics")
+        
+        # Generate trading signals
+        signals = generate_trading_signals(enriched_data)
+        signals_with_risk = add_risk_management_metrics(signals)
+        
+        # Output signals to console for monitoring
+        console_query = signals_with_risk.select(
+            "symbol", "timestamp", "close", "volume", "signal", 
+            "signal_strength", "volume_ratio", "price_change_pct",
+            "stop_loss_price", "take_profit_price"
+        ).writeStream \
+            .outputMode("append") \
+            .format("console") \
+            .option("truncate", False) \
+            .option("numRows", 20) \
+            .trigger(processingTime='30 seconds') \
+            .start()
+        
+        # Optional: Write to database
+        # database_query = self.write_to_database(signals_with_risk)
+        
+        print("Pipeline started successfully. Monitoring for trading signals...")
+        console_query.awaitTermination()
+    
+    def write_to_database(self, signals_df):
+        """Write trading signals to PostgreSQL database."""
+        def write_to_postgres(batch_df, batch_id):
+            """Custom function to write each batch to PostgreSQL."""
+            batch_df.write \
+                .format("jdbc") \
+                .option("url", "jdbc:postgresql://localhost:5432/trading") \
+                .option("dbtable", "trading_signals") \
+                .option("user", "postgres") \
+                .option("password", "password") \
+                .option("driver", "org.postgresql.Driver") \
+                .mode("append") \
+                .save()
+        
+        return signals_df.writeStream \
+            .foreachBatch(write_to_postgres) \
+            .outputMode("append") \
+            .option("checkpointLocation", "/tmp/checkpoint/signals") \
+            .trigger(processingTime='60 seconds') \
+            .start()
+
+def main():
+    """Main function to run the streaming processor."""
+    processor = StockStreamProcessor()
+    
+    try:
+        processor.run_streaming_pipeline()
+    except KeyboardInterrupt:
+        print("Stopping pipeline...")
+    finally:
+        if processor.spark:
+            processor.spark.stop()
+            print("Spark session closed")
+
+if __name__ == "__main__":
+    main()
